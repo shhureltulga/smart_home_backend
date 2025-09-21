@@ -6,15 +6,25 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
 
+import deviceRoutes from '../src/routes/devices.js';      // ← доорхыг нэмнэ
+import edgeRoutes from '../src/routes/edge.routes.js';    // ← edge webhook
+
+import app from './app.js';
+
 const app = express();
+app.set('trust proxy', 1);
 app.use(cors({ origin: true }));
 app.use(express.json());
 
+
+app.listen(PORT, () => console.log(`API listening on :${PORT}`));
+
 const prisma = new PrismaClient();
-const PORT = parseInt(process.env.PORT || '4000', 10);
+
+const PORT = Number(process.env.PORT || 4000);
 const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret';
-const ACCESS_TTL = parseInt(process.env.ACCESS_TOKEN_TTL_SEC || '3600', 10);
-const REFRESH_TTL_DAYS = parseInt(process.env.REFRESH_TOKEN_TTL_DAYS || '30', 10);
+const ACCESS_TTL = Number(process.env.ACCESS_TOKEN_TTL_SEC || 3600);
+const REFRESH_TTL_DAYS = Number(process.env.REFRESH_TOKEN_TTL_DAYS || 30);
 
 const now = () => new Date();
 const addDays = (d, x) => new Date(d.getTime() + x * 86400000);
@@ -23,7 +33,8 @@ const signAccess = (u) => jwt.sign({ sub: u.id, phone: u.phoneE164 }, JWT_SECRET
 
 app.get('/health', (_, res) => res.json({ ok: true }));
 
-// ✅ Бүртгэл (сонголттой)
+/* =====================  AUTH  ===================== */
+
 app.post('/auth/register', async (req, res) => {
   try {
     const phone = e164(req.body.phone);
@@ -53,7 +64,6 @@ app.post('/auth/register', async (req, res) => {
   }
 });
 
-// ✅ Нэвтрэх (утас + нууц үг)
 app.post('/auth/login', async (req, res) => {
   try {
     const phone = e164(req.body.phone);
@@ -91,7 +101,6 @@ app.post('/auth/login', async (req, res) => {
   }
 });
 
-// ✅ Middleware
 function auth(req, res, next) {
   const h = req.get('authorization') || '';
   const token = h.startsWith('Bearer ') ? h.slice(7) : '';
@@ -100,7 +109,6 @@ function auth(req, res, next) {
   catch { return res.status(401).json({ error: 'unauthorized' }); }
 }
 
-// ✅ /me
 app.get('/me', auth, async (req, res) => {
   const user = await prisma.user.findUnique({
     where: { id: req.user.sub },
@@ -113,7 +121,6 @@ app.get('/me', auth, async (req, res) => {
   res.json({ ok: true, user, households });
 });
 
-// ✅ Өрх үүсгэх (жишээ)
 app.post('/households', auth, async (req, res) => {
   const name = (req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'name_required' });
@@ -124,7 +131,6 @@ app.post('/households', auth, async (req, res) => {
   });
   res.json({ ok: true, household: h });
 });
-// --- REFRESH ACCESS TOKEN ---
 app.post('/auth/refresh', async (req, res) => {
   try {
     const { session_id, refresh_token } = req.body || {};
@@ -136,18 +142,17 @@ app.post('/auth/refresh', async (req, res) => {
     const ok = await bcrypt.compare(refresh_token, s.refreshTokenHash);
     if (!ok) return res.status(401).json({ error: 'invalid_refresh' });
 
-    // (сонголт) refresh token rotation
     const newRefreshToken = uuidv4() + '.' + uuidv4();
     const newRefreshHash  = await bcrypt.hash(newRefreshToken, 10);
     const updated = await prisma.authSession.update({
       where: { id: s.id },
-      data: { refreshTokenHash: newRefreshHash, expiresAt: new Date(Date.now() + 30 * 86400000) }
+      data: { refreshTokenHash: newRefreshHash, expiresAt: addDays(now(), 30) }
     });
 
     const user = await prisma.user.findUnique({ where: { id: s.userId } });
     res.json({
       ok: true,
-      access_token: jwt.sign({ sub: user.id, phone: user.phoneE164 }, JWT_SECRET, { expiresIn: ACCESS_TTL }),
+      access_token: signAccess(user),
       refresh_token: newRefreshToken,
       session_id: updated.id
     });
@@ -156,7 +161,6 @@ app.post('/auth/refresh', async (req, res) => {
   }
 });
 
-// --- LOGOUT (revoke session) ---
 app.post('/auth/logout', auth, async (req, res) => {
   try {
     const { session_id } = req.body || {};
@@ -170,7 +174,6 @@ app.post('/auth/logout', auth, async (req, res) => {
   }
 });
 
-// --- CHANGE PASSWORD ---
 app.post('/auth/change-password', auth, async (req, res) => {
   try {
     const { current_password, new_password } = req.body || {};
@@ -188,13 +191,20 @@ app.post('/auth/change-password', auth, async (req, res) => {
       data: { passwordHash: await bcrypt.hash(new_password, 10), passwordSetAt: new Date() }
     });
 
-    // (сонголт) бусад session-уудыг хүчингүй болгохыг хүсвэл:
-    // await prisma.authSession.updateMany({ where: { userId: user.id }, data: { revokedAt: new Date() } });
-
     res.json({ ok: true });
   } catch (e) {
     console.error(e); res.status(500).json({ error: 'server_error' });
   }
 });
+
+/* =====================  API ROUTES  ===================== */
+
+/** JWT шаардлагатай хэрэглэгчийн API */
+app.use('/api', auth, deviceRoutes);
+
+/** Edge webhook (JWT-гүй, HMAC-аар баталгаажна) */
+app.use('/edgehooks', edgeRoutes);
+
+/* =====================  START  ===================== */
 
 app.listen(PORT, () => console.log(`API listening on :${PORT}`));

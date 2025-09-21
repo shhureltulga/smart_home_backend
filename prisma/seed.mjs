@@ -2,7 +2,6 @@
 import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
-
 const prisma = new PrismaClient();
 
 async function upsertUser(phone, name, plainPassword) {
