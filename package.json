@@ -1,20 +1,23 @@
 {
   "name": "smart_home_backend",
   "version": "1.0.0",
-  "description": "",
+  "description": "Smart Home Main backend (Express, ESM)",
   "type": "module",
   "main": "server/index.js",
   "prisma": {
     "seed": "node prisma/seed.mjs"
   },
   "scripts": {
-    "dev": "nodemon --watch server --watch src --ext js,json --exec node server/index.js",
+    "dev": "nodemon --watch server --watch src --ext js,json --signal SIGTERM --exec node server/index.js",
     "start": "node server/index.js",
     "seed": "prisma db seed",
     "prisma:gen": "prisma generate",
     "prisma:mig": "prisma migrate dev -n init_schema",
     "db:push": "prisma db push",
     "prisma:studio": "prisma studio"
+  },
+  "engines": {
+    "node": ">=18.17.0"
   },
   "dependencies": {
     "@prisma/client": "^6.16.1",

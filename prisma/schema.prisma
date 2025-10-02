@@ -8,6 +8,8 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+/* ======================= ENUMS ======================= */
+
 enum MemberRole {
   owner
   admin
@@ -51,19 +53,18 @@ enum CommandStatus {
   timeout
 }
 
-/**
- * -------------------- USERS / AUTH --------------------
- */
-model User {
-  id          String   @id @default(uuid())
-  phoneE164   String   @unique @db.VarChar(20)
-  displayName String?
-  avatarUrl   String?
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+/* ================== USERS / AUTH ===================== */
 
-  // Нэмэлт:
+model User {
+  id            String           @id @default(uuid())
+  phoneE164     String           @unique @db.VarChar(20)
+  displayName   String?
+  avatarUrl     String?
+  isActive      Boolean          @default(true)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  // Password auth (optional)
   passwordHash  String?
   passwordSetAt DateTime?
 
@@ -72,36 +73,7 @@ model User {
   invitesSent       HouseholdMember[] @relation("InvitedBy")
   sessions          AuthSession[]
   householdsCreated Household[]       @relation("HouseholdCreatedBy")
-}
-
-model Household {
-  id          String   @id @default(uuid())
-  name        String
-  address     String?
-  createdById String?
-  createdBy   User?    @relation("HouseholdCreatedBy", fields: [createdById], references: [id])
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  members HouseholdMember[]
-}
-
-model HouseholdMember {
-  id          String       @id @default(uuid())
-  householdId String
-  userId      String
-  role        MemberRole   @default(member)
-  status      MemberStatus @default(active)
-  invitedById String?
-
-  // --- Relations ---
-  household Household @relation(fields: [householdId], references: [id])
-  user      User      @relation("UserMemberships", fields: [userId], references: [id])
-  invitedBy User?     @relation("InvitedBy", fields: [invitedById], references: [id])
-
-  createdAt DateTime @default(now())
-
-  @@unique([householdId, userId])
+  deviceControls    DeviceControl[]   @relation("UserDeviceControls")
 }
 
 model PhoneOtp {
@@ -133,28 +105,25 @@ model AuthSession {
   @@index([userId])
 }
 
-/**
- * -------------------- HOUSEHOLD / SITE --------------------
- */
+/* ================= HOUSEHOLD / SITE ================= */
+
 model Household {
-  id          String   @id @default(uuid())
+  id          String     @id @default(uuid())
   name        String
   address     String?
   createdById String?
-  createdBy   User?    @relation("HouseholdCreatedBy", fields: [createdById], references: [id])
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdBy   User?      @relation("HouseholdCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
 
   // Relations
   members        HouseholdMember[]
-  sites          Site[] // өрх дотор олон байшин
+  sites          Site[]                               // 1 household → N sites
   edgeNodes      EdgeNode[]        @relation("Household_EdgeNodes")
   sensorReadings SensorReading[]   @relation(name: "Household_SensorReadings")
   latestSensors  LatestSensor[]    @relation(name: "Household_LatestSensors")
-
-  // (Доор Room/Device нь householdId + siteId хоёрыг хоёуланг нь авч явна)
-  Room   Room[]
-  Device Device[]
+  rooms          Room[]
+  devices        Device[]
 }
 
 model HouseholdMember {
@@ -165,6 +134,7 @@ model HouseholdMember {
   status      MemberStatus @default(active)
   invitedById String?
 
+  // Relations
   household Household @relation(fields: [householdId], references: [id])
   user      User      @relation("UserMemberships", fields: [userId], references: [id])
   invitedBy User?     @relation("InvitedBy", fields: [invitedById], references: [id])
@@ -175,42 +145,45 @@ model HouseholdMember {
 }
 
 model Site {
-  id          String    @id @default(uuid())
+  id          String     @id @default(uuid())
   householdId String
-  household   Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  household   Household  @relation(fields: [householdId], references: [id], onDelete: Cascade)
 
-  name      String // ж: "Хотын байр", "Зуслан"
+  name      String       // ж: "Хотын байр", "Зуслан"
   address   String?
-  createdAt DateTime @default(now())
+  createdAt DateTime     @default(now())
 
   // Relations
-  edge     EdgeNode? // 1 Site = 1 Edge
+  edge     EdgeNode?     @relation("Site_Edge")  // 1:1 (EdgeNode.siteId @unique)
   rooms    Room[]
   devices  Device[]
   readings SensorReading[]
   latests  LatestSensor[]
 
-  @@unique([householdId, name]) // өрх дотор байшингийн нэр давхцахгүй
+  @@unique([householdId, name]) // нэг өрх дотор site name давхцахгүй
 }
 
-/**
- * -------------------- EDGE (NAS) --------------------
- */
+/* ======================= EDGE ======================= */
+
 model EdgeNode {
-  id          String    @id @default(uuid())
-  householdId String
-  household   Household @relation("Household_EdgeNodes", fields: [householdId], references: [id], onDelete: Cascade)
+  id           String     @id @default(uuid())
 
-  siteId String @unique
-  site   Site   @relation(fields: [siteId], references: [id])
+  householdId  String
+  household    Household  @relation("Household_EdgeNodes", fields: [householdId], references: [id], onDelete: Cascade)
 
-  name       String?
-  secretHash String?
-  baseUrl    String?
-  status     EdgeStatus @default(offline)
-  lastSeenAt DateTime?
-  createdAt  DateTime   @default(now())
-  updatedAt  DateTime   @updatedAt
+  siteId       String     @unique
+  site         Site       @relation("Site_Edge", fields: [siteId], references: [id])
+
+  // Танилцуулга / config
+  edgeId       String     @unique      // Edge process-ийн ID (ж: edge_nas_01)
+  name         String?
+  secretHash   String?
+  baseUrl      String?
+
+  status       EdgeStatus @default(offline)
+  lastSeenAt   DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
 
   commands      EdgeCommand[]
   SensorReading SensorReading[]
@@ -221,59 +194,58 @@ model EdgeNode {
 }
 
 model EdgeCommand {
-  id     String   @id @default(uuid())
-  edgeId String
-  edge   EdgeNode @relation(fields: [edgeId], references: [id], onDelete: Cascade)
+  id        String         @id @default(uuid())
+  edgeId    String
+  edge      EdgeNode       @relation(fields: [edgeId], references: [id], onDelete: Cascade)
 
-  payload Json
-  status  CommandStatus @default(queued)
-  error   String?
+  payload   Json
+  status    CommandStatus  @default(queued)
+  error     String?
 
-  createdAt DateTime  @default(now())
+  createdAt DateTime       @default(now())
   sentAt    DateTime?
   ackedAt   DateTime?
 
   @@index([edgeId, status, createdAt])
 }
 
-/**
- * -------------------- ROOMS / DEVICES --------------------
- */
+/* ================== ROOMS / DEVICES ================= */
+
 model Room {
-  id          String @id @default(uuid())
+  id          String    @id @default(uuid())
   householdId String
   siteId      String
-  site        Site   @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  site        Site      @relation(fields: [siteId], references: [id], onDelete: Cascade)
 
-  name  String // "Том өрөө"
+  name  String          // "Том өрөө"
   color String?
   icon  String?
-  order Int     @default(0)
+  order Int             @default(0)
 
-  // Зөвшөөрөл/шүүлтэд householdId хэрэг болно
-  household Household @relation(fields: [householdId], references: [id])
+  // зөвшөөрөл/шүүлтэд householdId хэрэгтэй
+  household Household   @relation(fields: [householdId], references: [id])
 
-  @@unique([siteId, name]) // нэг байшинд нэр давхцахгүй
+  @@unique([siteId, name]) // нэг site дотор нэр давхцахгүй
   @@index([householdId])
 }
 
 model Device {
-  id          String @id @default(uuid())
+  id          String       @id @default(uuid())
   householdId String
   siteId      String
-  site        Site   @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  site        Site         @relation(fields: [siteId], references: [id], onDelete: Cascade)
 
   name       String
   type       DeviceType
   room       String?
-  status     DeviceStatus @default(offline)
-  isOn       Boolean      @default(false)
+  status     DeviceStatus  @default(offline)
+  isOn       Boolean       @default(false)
   settings   Json?
   lastActive DateTime?
-  createdAt  DateTime     @default(now())
-  updatedAt  DateTime     @updatedAt
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
 
-  household Household @relation(fields: [householdId], references: [id])
+  household Household      @relation(fields: [householdId], references: [id])
 
   @@index([householdId])
   @@index([siteId])
@@ -295,9 +267,8 @@ model DeviceControl {
   @@index([userId])
 }
 
-/**
- * -------------------- SENSOR DATA --------------------
- */
+/* ==================== SENSOR DATA =================== */
+
 model SensorReading {
   id String @id @default(uuid())
 
@@ -310,11 +281,11 @@ model SensorReading {
   edgeId String?
   edge   EdgeNode? @relation(fields: [edgeId], references: [id])
 
-  deviceKey String // ж: "temp", "hum", "relay_1"
-  type      String? // ж: "temperature" | "humidity" | ...
+  deviceKey String       // ж: "livingroom.temp"
+  type      String?      // ж: "temperature" | "humidity" | ...
   value     Float
-  ts        DateTime @default(now())
-  createdAt DateTime @default(now())
+  ts        DateTime     @default(now())
+  createdAt DateTime     @default(now())
 
   @@index([householdId, ts])
   @@index([siteId, deviceKey, ts])
@@ -340,7 +311,7 @@ model LatestSensor {
   ts        DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Нэг байшинд ижил deviceKey ганц мөр
+  // Нэг site дотор ижил deviceKey ганц мөр
   @@unique([siteId, deviceKey])
   @@index([siteId, updatedAt])
 }
