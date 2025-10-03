@@ -159,6 +159,8 @@ model Site {
   devices  Device[]
   readings SensorReading[]
   latests  LatestSensor[]
+  latitude     Float?   // WGS84
+  longitude    Float?   // WGS84
 
   @@unique([householdId, name]) // нэг өрх дотор site name давхцахгүй
 }
