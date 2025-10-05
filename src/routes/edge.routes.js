@@ -219,5 +219,70 @@ r.post('/edge/commands/ack', verifyHmac, async (req, res) => {
     return res.status(500).json({ ok: false, error: 'commands_ack_failed', detail: String(e?.message || e) });
   }
 });
+// rooms sync receiver
+// EDGEHOOKS: rooms sync -> queue EdgeCommands for HA
+r.post('/rooms', verifyHmac, async (req, res) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const { event, siteId, householdId, room, prevName } = req.body || {};
+    if (!event || !siteId || !householdId || !room?.id || !room?.name) {
+      return res.status(400).json({ ok: false, error: 'bad_request' });
+    }
+
+    // Site баталгаажуулах
+    const site = await prisma.site.findUnique({ where: { id: siteId } });
+    if (!site || site.householdId !== householdId) {
+      return res.status(404).json({ ok: false, error: 'site_not_found_or_mismatch' });
+    }
+
+    // Энэ site-д хамаарах бүх EdgeNode
+    const edges = await prisma.edgeNode.findMany({
+      where: { siteId, householdId },
+      select: { id: true },
+      orderBy: { lastSeenAt: 'desc' },
+    });
+    if (edges.length === 0) {
+      console.log('[EDGEHOOKS /rooms] no edge nodes for site, skipping queue');
+      return res.json({ ok: true, queued: 0 });
+    }
+
+    // event -> op map
+    let op;
+    if (event === 'room.created') op = 'ha.area.ensure';
+    else if (event === 'room.updated') op = 'ha.area.rename';
+    else if (event === 'room.deleted') op = 'ha.area.delete';
+    else return res.status(400).json({ ok: false, error: 'unknown_event' });
+
+    // edge payload
+    const payload = {
+      op,
+      event,
+      siteId,
+      householdId,
+      room: { id: room.id, name: room.name },
+      // rename үед хуучин нэрийг дамжуулбал илүү найдвартай
+      fromName: prevName || undefined,
+      toName: room.name,
+      haAreaId: room.haAreaId || null,
+      ts: new Date().toISOString(),
+    };
+
+    // queue to all edges
+    await prisma.edgeCommand.createMany({
+      data: edges.map(e => ({
+        edgeId: e.id,
+        status: 'queued',
+        payload,
+      })),
+    });
+
+    console.log(`[EDGEHOOKS] rooms queued -> ${op} for ${edges.length} edge(s) room=${room.id} "${room.name}"`);
+    return res.json({ ok: true, queued: edges.length });
+  } catch (e) {
+    console.error('[EDGEHOOKS /rooms] error:', e?.message || e);
+    return res.status(500).json({ ok: false, error: 'rooms_queue_failed' });
+  }
+});
+
 
 export default r;

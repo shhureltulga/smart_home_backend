@@ -215,21 +215,28 @@ model EdgeCommand {
 
 model Room {
   id          String    @id @default(uuid())
+
   householdId String
   siteId      String
   site        Site      @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  household   Household @relation(fields: [householdId], references: [id])
 
   name  String          // "Том өрөө"
   color String?
   icon  String?
   order Int             @default(0)
 
-  // зөвшөөрөл/шүүлтэд householdId хэрэгтэй
-  household Household   @relation(fields: [householdId], references: [id])
+  // HA талд үүссэн area-ийн ID (sync хийгдсэний дараа бөглөнө)
+  haAreaId  String?
 
-  @@unique([siteId, name]) // нэг site дотор нэр давхцахгүй
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([siteId, name])       // нэг site дотор нэр давхцахгүй
   @@index([householdId])
+  @@index([siteId])
 }
+
 
 model Device {
   id          String       @id @default(uuid())

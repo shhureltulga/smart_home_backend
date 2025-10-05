@@ -10,6 +10,8 @@ import edgeRoutes from '../src/routes/edge.routes.js';
 import authRoutes from './routes/auth.js';
 import { auth } from './middleware/auth.js';
 import siteRoutes from './routes/sites.js';
+import roomsRoutes from './routes/rooms.js';
+import { emitEdge } from './utils/emit.js';
 
 const app = express();
 app.set('trust proxy', 1);
@@ -66,6 +68,7 @@ app.use('/api', auth, deviceRoutes);
 app.use('/api', /* auth, */ siteRoutes);
 /* ---------- Edge webhook (JWT-гүй, HMAC) ---------- */
 app.use('/edgehooks', edgeRoutes);
+app.use('/api', roomsRoutes);
 
 /* ---------- 404 & error handlers ---------- */
 app.use((req, res) => res.status(404).json({ error: 'not_found', path: req.path }));
