@@ -16,7 +16,6 @@ import { auth } from './middleware/auth.js';
 import siteRoutes from './routes/sites.js';
 import roomsRoutes from './routes/rooms.js';
 import { emitEdge } from './utils/emit.js';
-
 // NEW: PBD upload + latest
 import pbdRoutes from './routes/pbd.js';
 import { getLatestForSite } from '../src/controllers/pbdLatest.js';
@@ -47,6 +46,7 @@ app.use('/cdn', express.static(CDN_ROOT, {
     res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
   }
 }));
+
 
 // Health
 app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
@@ -83,6 +83,7 @@ app.get('/me', auth, async (req, res) => {
   }
 });
 
+app.use('/api/devices', deviceRoutes);
 
 /* ---------- JWT шаардлагатай хэрэглэгчийн API ---------- */
 app.use('/api', auth, deviceRoutes);

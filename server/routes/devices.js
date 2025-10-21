@@ -27,4 +27,60 @@ r.get('/households/:hid/overview', async (req, res) => {
   res.json({ ok: true, rooms, devices, latest });
 });
 
+r.post('/devices/register', async (req, res) => {
+  const {
+    deviceKey, siteId, householdId, name, type,
+    domain, deviceClass, roomId, floorId, pos
+  } = req.body;
+
+  if (!deviceKey || !siteId || !householdId) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+
+  const device = await prisma.device.upsert({
+    where: { id: deviceKey },
+    update: {
+      name, type, domain, deviceClass, roomId, floorId, pos,
+      updatedAt: new Date()
+    },
+    create: {
+      id: deviceKey,
+      siteId, householdId, name, type,
+      domain, deviceClass, roomId, floorId, pos
+    }
+  });
+
+  return res.json({ ok: true, device });
+});
+
+r.patch('/devices/:id/room', async (req, res) => {
+  const { id } = req.params;
+  const { roomId } = req.body;
+
+  if (!roomId) return res.status(400).json({ error: 'roomId required' });
+
+  const device = await prisma.device.update({
+    where: { id },
+    data: { roomId, updatedAt: new Date() }
+  });
+
+  res.json({ ok: true, device });
+});
+
+r.patch('/devices/:id/position', async (req, res) => {
+  const { id } = req.params;
+  const { pos } = req.body;
+
+  if (!pos || typeof pos !== 'object') {
+    return res.status(400).json({ error: 'pos (object) required' });
+  }
+
+  const device = await prisma.device.update({
+    where: { id },
+    data: { pos, updatedAt: new Date() }
+  });
+
+  res.json({ ok: true, device });
+});
+
 export default r;

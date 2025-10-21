@@ -247,13 +247,19 @@ model Device {
 
   name       String
   type       DeviceType
-  room       String?
+  
   status     DeviceStatus  @default(offline)
   isOn       Boolean       @default(false)
   settings   Json?
   lastActive DateTime?
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
+
+  floorId     String?       // "F1", "F2" гэх мэт
+  roomId      String?       // canonical roomId
+  domain      String?       // "sensor", "switch", "light", ...
+  deviceClass String?       // "temperature", "humidity", ...
+  pos         Json?         // 3D байрлал (anchor, u, v, h)
 
   household Household      @relation(fields: [householdId], references: [id])
 
@@ -297,6 +303,9 @@ model SensorReading {
   ts        DateTime     @default(now())
   createdAt DateTime     @default(now())
 
+  domain      String?
+  deviceClass String?
+
   @@index([householdId, ts])
   @@index([siteId, deviceKey, ts])
   @@index([householdId, siteId, ts])
@@ -320,6 +329,9 @@ model LatestSensor {
   value     Float
   ts        DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  domain      String?
+  deviceClass String?
 
   // Нэг site дотор ижил deviceKey ганц мөр
   @@unique([siteId, deviceKey])
