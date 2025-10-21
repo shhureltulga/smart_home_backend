@@ -161,6 +161,7 @@ model Site {
   latests  LatestSensor[]
   latitude     Float?   // WGS84
   longitude    Float?   // WGS84
+  unit         Unit?
 
   @@unique([householdId, name]) // нэг өрх дотор site name давхцахгүй
 }
@@ -324,3 +325,92 @@ model LatestSensor {
   @@unique([siteId, deviceKey])
   @@index([siteId, updatedAt])
 }
+
+
+// --- Enums ---
+enum City {
+  ULAANBAATAR
+  DARKHAN
+  ERDENET
+  OTHER
+}
+
+enum District {
+  KHAN_UUL
+  BAYANGOL
+  BAYANZURKH
+  SONGINOKHAIRKHAN
+  CHINGELTEI
+  SUKHBAATAR
+  NALAIKH
+  BAGANUUR
+  BAGAKHANGAI
+  NONE      // Ulaanbaatar биш хотын тохиолдолд ашиглах
+}
+
+// --- Models ---
+model Complex {
+  id         String   @id @default(uuid())
+  name       String
+  city       City
+  district   District
+  address    String?
+  centerLat  Float?
+  centerLng  Float?
+  geo        Json?
+  photoUrl   String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  blocks     Block[]
+  units      Unit[]
+
+  @@index([name])
+   @@unique([name, city, district]) 
+}
+
+model Block {
+  id         String  @id @default(uuid())
+  complexId  String
+  name       String
+  floors     Int?
+  entrances  Int?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  complex    Complex  @relation(fields: [complexId], references: [id])
+  entrancesR Entrance[]
+  units      Unit[]
+}
+
+model Entrance {
+  id        String  @id @default(uuid())
+  blockId   String
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  block     Block    @relation(fields: [blockId], references: [id])
+  units     Unit[]
+}
+
+model Unit {
+  id          String   @id @default(uuid())
+  complexId   String
+  blockId     String?
+  entranceId  String?
+  number      String
+  floor       Int?
+  areaSqm     Float?
+  status      String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  complex     Complex   @relation(fields: [complexId], references: [id])
+  block       Block?    @relation(fields: [blockId], references: [id])
+  entrance    Entrance? @relation(fields: [entranceId], references: [id])
+  siteId      String?   @unique
+  site        Site?     @relation(fields: [siteId], references: [id])
+ @@unique([complexId, number]) 
+}
+
