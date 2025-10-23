@@ -118,6 +118,9 @@ r.post('/rooms', auth, async (req, res) => {
 
     // EdgeCommand queue — HA дээр area ensure
     await enqueueForSite(prisma, room.siteId, site.householdId, {
+      id: room.id,                         // ← Хэрэв command id гэж тусгай ID байхгүй бол room.id-г хэрэглэж болно
+      type: 'ha.area.ensure',             // ← poller заавал үүнийг харна
+      deviceKey: `room_${room.id}`,       // ← ямар нэг unique string. room дээр бол `room_${id}` гэх мэт
       op: 'ha.area.ensure',
       event: 'room.created',
       siteId: room.siteId,
@@ -126,6 +129,7 @@ r.post('/rooms', auth, async (req, res) => {
       haAreaId: room.haAreaId ?? null,
       ts: new Date().toISOString(),
     });
+
 
     return res.json({ ok: true, room });
   } catch (e) {
@@ -172,6 +176,9 @@ r.patch('/rooms/:roomId', auth, async (req, res) => {
 
     // EdgeCommand queue — rename
     await enqueueForSite(prisma, updated.siteId, site.householdId, {
+      id: updated.id, 
+      type: 'ha.area.rename',
+      deviceKey: `room_${updated.id}`,
       op: 'ha.area.rename',
       event: 'room.updated',
       siteId: updated.siteId,
@@ -187,6 +194,18 @@ r.patch('/rooms/:roomId', auth, async (req, res) => {
     if (e?.code === 'P2002') return res.status(409).json({ error: 'room_name_conflict' });
     return res.status(500).json({ error: 'server_error' });
   }
+});
+
+r.patch('/rooms/:id/ha', auth, async (req, res) => {
+  const { id } = req.params;
+  const { haAreaId } = req.body || {};
+  if (!haAreaId) return res.status(400).json({ error: 'haAreaId required' });
+
+  const room = await prisma.room.update({
+    where: { id },
+    data: { haAreaId },
+  });
+  res.json({ ok: true, room });
 });
 
 /* ------------------------------ DELETE ------------------------------- */
@@ -218,6 +237,9 @@ r.delete('/rooms/:roomId', auth, async (req, res) => {
 
     // EdgeCommand queue — delete
     await enqueueForSite(prisma, room.siteId, site.householdId, {
+      id: room.id, 
+      type: 'ha.area.delete',
+      deviceKey: `room_${room.id}`,
       op: 'ha.area.delete',
       event: 'room.deleted',
       siteId: room.siteId,
@@ -226,6 +248,7 @@ r.delete('/rooms/:roomId', auth, async (req, res) => {
       haAreaId: room.haAreaId ?? null,
       ts: new Date().toISOString(),
     });
+
 
     return res.json({ ok: true });
   } catch (e) {

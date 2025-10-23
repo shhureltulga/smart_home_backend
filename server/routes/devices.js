@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { PrismaClient } from '@prisma/client';
+import { hmacGuard } from '../../src/lib/hmac.js';
 
 const prisma = new PrismaClient();
 const r = Router();
@@ -27,30 +28,35 @@ r.get('/households/:hid/overview', async (req, res) => {
   res.json({ ok: true, rooms, devices, latest });
 });
 
-r.post('/devices/register', async (req, res) => {
-  const {
-    deviceKey, siteId, householdId, name, type,
-    domain, deviceClass, roomId, floorId, pos
-  } = req.body;
-
-  if (!deviceKey || !siteId || !householdId) {
-    return res.status(400).json({ error: 'Missing required fields' });
-  }
-
-  const device = await prisma.device.upsert({
-    where: { id: deviceKey },
-    update: {
-      name, type, domain, deviceClass, roomId, floorId, pos,
-      updatedAt: new Date()
-    },
-    create: {
-      id: deviceKey,
-      siteId, householdId, name, type,
+r.post('/devices/register', hmacGuard, async (req, res) => {
+  try {
+    const {
+      householdId, deviceKey, siteId, name, type,
       domain, deviceClass, roomId, floorId, pos
-    }
-  });
+    } = req.body || {};
 
-  return res.json({ ok: true, device });
+    if (!householdId || !deviceKey || !siteId || !name || !type) {
+      return res.status(400).json({ error: 'bad_request' });
+    }
+
+    const device = await prisma.device.upsert({
+      where: { householdId_deviceKey: { householdId, deviceKey } },
+      create: {
+        householdId, siteId,deviceKey, name, type,
+        domain, deviceClass, roomId, floorId, pos,
+        status: 'online'
+      },
+      update: {
+        siteId, name, type, domain, deviceClass, roomId, floorId, pos,
+        status: 'online'
+      }
+    });
+
+    return res.json({ ok: true, device });
+  } catch (e) {
+    console.error('[devices.register] error', e);
+    return res.status(500).json({ error: 'server_error' });
+  }
 });
 
 r.patch('/devices/:id/room', async (req, res) => {

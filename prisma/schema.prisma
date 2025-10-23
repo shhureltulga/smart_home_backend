@@ -255,6 +255,7 @@ model Device {
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
 
+  deviceKey   String
   floorId     String?       // "F1", "F2" гэх мэт
   roomId      String?       // canonical roomId
   domain      String?       // "sensor", "switch", "light", ...
@@ -262,7 +263,9 @@ model Device {
   pos         Json?         // 3D байрлал (anchor, u, v, h)
 
   household Household      @relation(fields: [householdId], references: [id])
-
+   
+  @@unique([householdId, deviceKey])
+   
   @@index([householdId])
   @@index([siteId])
   @@index([type])
