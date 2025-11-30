@@ -20,11 +20,13 @@ import { emitEdge } from './utils/emit.js';
 // NEW: PBD upload + latest
 import pbdRoutes from './routes/pbd.js';
 import { getLatestForSite } from '../src/controllers/pbdLatest.js';
+import { devQueue } from './routes/devQueue.js';
 
-
+import floorsRoutes from './routes/floors.js';
 
 const app = express();
 app.set('trust proxy', 1);
+
 
 // CORS + body parsers
 app.use(cors({ origin: true, credentials: true }));
@@ -91,7 +93,7 @@ app.use('/api', auth, deviceRoutes);
 
 app.use('/api', /* auth, */ siteRoutes);
 app.use('/api', roomsRoutes);
-
+app.use('/api', floorsRoutes);
 app.use('/api/complexes', complexes);
 app.use('/api/units', unitRoutes);
 /* ---------- PBD: Upload (админ/портал) + Latest (апп) ---------- */
@@ -101,9 +103,11 @@ app.use('/api/pbd', auth, pbdRoutes);
 app.get('/api/site/:siteId/pbd/latest', auth, getLatestForSite);
 
 /* ---------- Edge webhook (JWT-гүй, HMAC) ---------- */
-app.use('/edgehooks', edgeRoutes);
+ app.use('/edgehooks', edgeRoutes);
+// app.use('/edgehooks', express.json({ type: '*/*', limit: '1mb' }), edgeRoutes);
 
 
+app.use('/api/dev', devQueue);
 
 /* ---------- 404 & error handlers ---------- */
 app.use((req, res) => res.status(404).json({ error: 'not_found', path: req.path }));

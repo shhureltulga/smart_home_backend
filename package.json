@@ -11,6 +11,7 @@
     "dev": "nodemon --watch server --watch src --ext js,json --signal SIGTERM --exec node server/index.js",
     "start": "node server/index.js",
     "seed": "prisma db seed",
+    "build": "echo \"no build step\"",
     "prisma:gen": "prisma generate",
     "prisma:mig": "prisma migrate dev -n init_schema",
     "db:push": "prisma db push",

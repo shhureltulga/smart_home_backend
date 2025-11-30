@@ -286,6 +286,85 @@ async function linkOneUnitToSite(siteId, complexId) {
   return updated;
 }
 
+// === Floors ===
+async function upsertFloors(householdId, siteId, floors = [
+  { name: 'F1', code: 'F1', order: 1, level: 1 },
+  { name: 'F2', code: 'F2', order: 2, level: 2 },
+  { name: 'B1', code: 'B1', order: 0, level: -1 },
+]) {
+  const created = [];
+  for (const f of floors) {
+    // нэг site дотор нэр давхцахгүй (@@unique([siteId, name]))
+    let row = await prisma.floor.findFirst({
+      where: { siteId, name: f.name },
+      select: { id: true, name: true },
+    });
+    if (!row) {
+      row = await prisma.floor.create({
+        data: {
+          householdId,
+          siteId,
+          name: f.name,
+          code: f.code ?? null,
+          order: f.order ?? 0,
+          level: f.level ?? null,
+        },
+        select: { id: true, name: true },
+      });
+    }
+    created.push(row);
+  }
+  return created;
+}
+
+async function seedRoomsAndDevicesOnFloors(householdId, siteId, floors) {
+  // F1, F2 байна гэж үзээд анхныхыг авъя
+  const f1 = floors.find(f => f.name === 'F1') ?? floors[0];
+
+  // Өрөө (floorId холбоно)
+  const living = await prisma.room.upsert({
+    where: { // site дотор нэр давхцахгүй тул unique where-г simulate хийе
+      // Prisma upsert unique where шаарддаг; trick: unique key байвал шууд where ашиглана
+      // Хэрэв unique key байхгүй бол findFirst хийж create/update салаалах хэрэгтэй.
+      id: '___not_used___', // ← upsert-д таарахгүй тул доорх fallback руу орно (findFirst)
+    },
+    update: {},
+    create: {
+      householdId,
+      siteId,
+      name: 'Том өрөө',
+      floorId: f1?.id ?? null,
+    },
+  }).catch(async () => {
+    const exists = await prisma.room.findFirst({ where: { siteId, name: 'Том өрөө' } });
+    return exists ?? prisma.room.create({
+      data: { householdId, siteId, name: 'Том өрөө', floorId: f1?.id ?? null },
+    });
+  });
+
+  // Төхөөрөмж (floorId холбоно)
+  const light = await prisma.device.findFirst({
+    where: { householdId, siteId, deviceKey: 'light.living.ceiling' },
+    select: { id: true },
+  });
+  if (!light) {
+    await prisma.device.create({
+      data: {
+        householdId,
+        siteId,
+        name: 'Ceiling Light',
+        type: 'light',
+        deviceKey: 'light.living.ceiling',
+        floorId: f1?.id ?? null,
+        roomId: living.id,
+        status: 'online',
+        isOn: false,
+      },
+    });
+  }
+}
+
+
 /** ---------------- Main ---------------- */
 async function main() {
   // === Users ===
