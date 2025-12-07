@@ -138,22 +138,25 @@ r.get('/sites/:siteId/floors/:floorId/devices', async (req, res) => {
   const prisma = req.app.locals.prisma;
   const { siteId, floorId } = req.params;
 
-  // 1) Энэ давхрын өрөөнүүд
+  // 1) Энэ давхрын өрөөнүүд – name-ийг нь бас авна
   const rooms = await prisma.room.findMany({
     where: { siteId, floorId },
-    select: { id: true, floorId: true },
+    select: { id: true, name: true, floorId: true },
   });
-  const roomIds = rooms.map(r => r.id);
+  const roomIds = rooms.map((r) => r.id);
   const roomIdSet = new Set(roomIds);
+  const roomNameById = new Map(
+    rooms.map((r) => [r.id, (r.name || 'Room').trim()])
+  );
 
   // 2) Төхөөрөмжүүд
   const rawDevices = await prisma.device.findMany({
     where: {
       siteId,
       OR: [
-        { floorId }, // өөр дээрээ энэ давхар
+        { floorId }, // өөр дээрээ энэ давхарт байгаа
         roomIds.length
-          ? { roomId: { in: roomIds } } // энэ давхрын өрөөнд байгаа
+          ? { roomId: { in: roomIds } } // энэ давхрын өрөөнүүдэд байгаа
           : { id: { in: [] } },
       ],
     },
@@ -176,7 +179,7 @@ r.get('/sites/:siteId/floors/:floorId/devices', async (req, res) => {
   const DEFAULT_POS = { x: 0, y: 0.9, z: 0 };
 
   // 3) Эдгээр deviceKey-үүдийн latestSensor-уудыг татна
-  const deviceKeys = rawDevices.map(d => d.deviceKey);
+  const deviceKeys = rawDevices.map((d) => d.deviceKey);
   const latestRows = deviceKeys.length
     ? await prisma.latestSensor.findMany({
         where: {
@@ -195,7 +198,6 @@ r.get('/sites/:siteId/floors/:floorId/devices', async (req, res) => {
       })
     : [];
 
-  // deviceKey -> [sensors]
   const sensorsByKey = new Map();
   for (const s of latestRows) {
     const arr = sensorsByKey.get(s.deviceKey) || [];
@@ -210,16 +212,19 @@ r.get('/sites/:siteId/floors/:floorId/devices', async (req, res) => {
     sensorsByKey.set(s.deviceKey, arr);
   }
 
-  // 4) Floor-д тааруулж + pos + sensors хавсаргана
-  const devices = rawDevices.map(d => ({
+  // 4) Floor + pos + sensors + roomName
+  const devices = rawDevices.map((d) => ({
     ...d,
-    floorId: d.floorId ?? (d.roomId && roomIdSet.has(d.roomId) ? floorId : null),
+    floorId:
+      d.floorId ?? (d.roomId && roomIdSet.has(d.roomId) ? floorId : null),
     pos: d.pos ?? DEFAULT_POS,
     sensors: sensorsByKey.get(d.deviceKey) || [],
+    roomName: d.roomId ? roomNameById.get(d.roomId) || null : null,
   }));
 
   res.json({ ok: true, devices });
 });
+
 
 
 /* Edge рүү push хийх best-effort туслах */
@@ -354,6 +359,169 @@ r.post('/sites/:siteId/devices/:deviceKey/command', auth, async (req, res) => {
   req.params.id = device.id;        // id-ийг override
   req.body = { action, value, entityKey, haEntityId };
   return r.handle(req, res);        // эсвэл логикийг copy/paste хийгээд ашигла
+});
+
+// 🌡 helper – latestSensor-уудаас нэгтгэсэн объект гаргаж авах
+function buildLatestSummary(sensors) {
+  const latest = {};
+
+  for (const s of sensors) {
+    const key  = (s.entityKey || '').toLowerCase();
+    const unit = (s.unit || '').toLowerCase();
+    const val  = s.value;
+
+    // setpoint (паарны тохиргоо)
+    if (key.includes('setpoint')) {
+      if (latest.setpoint == null) latest.setpoint = val;
+    }
+
+    // temperature
+    if (key.includes('temperature') || unit.includes('°c') || unit === 'c') {
+      if (latest.temperature == null) latest.temperature = val;
+    }
+
+    // humidity
+    if (key.includes('humidity') || unit === '%') {
+      if (latest.humidity == null) latest.humidity = val;
+    }
+
+    // co2
+    if (key.includes('co2')) {
+      if (latest.co2 == null) latest.co2 = val;
+    }
+
+    // pressure
+    if (key.includes('pressure') || unit.includes('hpa')) {
+      if (latest.pressure == null) latest.pressure = val;
+    }
+
+    // battery
+    if (key.includes('battery')) {
+      if (latest.battery == null) latest.battery = val;
+    }
+
+    // link quality
+    if (key.includes('lqi') || key.includes('linkquality')) {
+      if (latest.lqi == null) latest.lqi = val;
+    }
+  }
+
+  return latest;
+}
+// NEW: Mobile card-уудад зориулсан API
+// GET /sites/:siteId/floors/:floorId/devices/card
+r.get('/sites/:siteId/floors/:floorId/devices/card', async (req, res) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const { siteId, floorId } = req.params;
+
+    // 1) Энэ давхрын өрөөнүүд
+    const rooms = await prisma.room.findMany({
+      where: { siteId, floorId },
+      select: { id: true, floorId: true },
+    });
+    const roomIds   = rooms.map(r => r.id);
+    const roomIdSet = new Set(roomIds);
+
+    // 2) Төхөөрөмжүүд
+    const rawDevices = await prisma.device.findMany({
+      where: {
+        siteId,
+        OR: [
+          { floorId },                                // өөр дээрээ энэ давхар
+          roomIds.length
+            ? { roomId: { in: roomIds } }            // энэ давхрын өрөөнд байгаа
+            : { id: { in: [] } },
+        ],
+      },
+      orderBy: [{ roomId: 'asc' }, { name: 'asc' }],
+      select: {
+        id: true,
+        name: true,
+        domain: true,
+        type: true,
+        deviceClass: true,
+        roomId: true,
+        floorId: true,
+        pos: true,
+        isOn: true,
+        deviceKey: true,
+        label: true,
+      },
+    });
+
+    const DEFAULT_POS = { x: 0, y: 0.9, z: 0 };
+
+    // 3) Эдгээр deviceKey-үүдийн latestSensor-ууд
+    const deviceKeys = rawDevices
+      .map(d => d.deviceKey)
+      .filter(k => !!k);
+
+    const latestRows = deviceKeys.length
+      ? await prisma.latestSensor.findMany({
+          where: {
+            siteId,
+            deviceKey: { in: deviceKeys },
+          },
+          select: {
+            deviceKey: true,
+            entityKey: true,
+            value: true,
+            unit: true,
+            stateClass: true,
+            domain: true,
+            haEntityId: true,
+          },
+        })
+      : [];
+
+    // deviceKey -> [sensors]
+    const sensorsByKey = new Map();
+    for (const s of latestRows) {
+      const arr = sensorsByKey.get(s.deviceKey) || [];
+      arr.push({
+        entityKey: s.entityKey,
+        value: s.value,
+        unit: s.unit,
+        stateClass: s.stateClass,
+        domain: s.domain,
+        haEntityId: s.haEntityId,
+      });
+      sensorsByKey.set(s.deviceKey, arr);
+    }
+
+    // 4) App-д зориулсан card model (нэг төхөөрөмж = нэг карт)
+    const devices = rawDevices.map(d => {
+      const sensors = sensorsByKey.get(d.deviceKey) || [];
+      const latest  = buildLatestSummary(sensors);
+
+      return {
+        id: d.id,
+        name: d.label || d.name,
+        domain: d.domain,          // light / sensor / climate / switch ...
+        type: d.type,
+        deviceClass: d.deviceClass,
+        roomId: d.roomId,
+        floorId:
+          d.floorId ||
+          (d.roomId && roomIdSet.has(d.roomId) ? floorId : null),
+        pos: d.pos || DEFAULT_POS,
+        isOn: d.isOn,
+        deviceKey: d.deviceKey,
+
+        // бүх entity-үүд
+        sensors,
+
+        // нэгтгэсэн сүүлийн утгууд (Flutter-т шууд ашиглана)
+        latestSensor: latest,
+      };
+    });
+
+    res.json({ ok: true, devices });
+  } catch (err) {
+    console.error('GET /sites/:siteId/floors/:floorId/devices/card error', err);
+    res.status(500).json({ ok: false, error: 'internal_error' });
+  }
 });
 
 export default r;

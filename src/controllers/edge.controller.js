@@ -38,18 +38,63 @@ export async function ingestFromEdge(req, res) {
       ts: r.ts ? new Date(r.ts) : now,
     }));
 
-    if (createData.length) {
+        if (createData.length) {
+      // 1) History руу бичих
       await prisma.sensorReading.createMany({ data: createData });
 
-      // latestSensors-г upsert (сүүлийн утга)
-      await Promise.all(createData.map((r) =>
-        prisma.latestSensor.upsert({
-          where: { householdId_deviceKey: { householdId, deviceKey: r.deviceKey } },
-          update: { value: r.value, type: r.type, ts: r.ts, updatedAt: new Date() },
-          create: { householdId, deviceKey: r.deviceKey, type: r.type, value: r.value, ts: r.ts }
-        })
-      ));
+      const latestOps = [];
+      const deviceOps = [];
+
+      for (const r of createData) {
+        // 2) latestSensor-г upsert (сүүлийн утга)
+        latestOps.push(
+          prisma.latestSensor.upsert({
+            where: {
+              householdId_deviceKey: {
+                householdId,
+                deviceKey: r.deviceKey,
+              },
+            },
+            update: {
+              value: r.value,
+              type: r.type,
+              ts: r.ts,
+              updatedAt: new Date(),
+            },
+            create: {
+              householdId,
+              deviceKey: r.deviceKey,
+              type: r.type,
+              value: r.value,
+              ts: r.ts,
+            },
+          }),
+        );
+
+        // 3) Device.status / isOn / lastActive шинэчлэх
+        deviceOps.push(
+          prisma.device.updateMany({
+            where: {
+              householdId,
+              siteId: site.id,          // чамаар бол `siteId` байж таарна
+              deviceKey: r.deviceKey,   // ⬅️ ИЙМ ТАЛБАР БАЙГАА ГЭДГЭЭР ТААМАГЛАЖ БАЙНА
+            },
+            data: {
+              status: 'online',
+              lastActive: r.ts,
+              ...( ['switch', 'light', 'relay'].includes(r.type ?? '')
+                ? { isOn: Number(r.value) > 0 }  // boolean → true/false
+                : {} ),
+            },
+          }),
+        );
+
+      }
+
+      // 4) бүгдийг зэрэг гүйцэтгэх
+      await Promise.all([...latestOps, ...deviceOps]);
     }
+
 
     // Edge lastSeen
     if (edgeId) {
