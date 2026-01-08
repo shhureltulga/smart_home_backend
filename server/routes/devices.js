@@ -211,21 +211,91 @@ r.get('/sites/:siteId/floors/:floorId/devices', async (req, res) => {
     });
     sensorsByKey.set(s.deviceKey, arr);
   }
+  // 3) sensorsByKey гээд бэлдсэний дараа, devices map хийхийн өмнө:
+  function computeIsOn(domain, sensors, fallback) {
+    const norm = (v) => (v === null || v === undefined) ? '' : String(v).toLowerCase().trim();
 
-  // 4) Floor + pos + sensors + roomName
-  const devices = rawDevices.map((d) => ({
-    ...d,
-    floorId:
-      d.floorId ?? (d.roomId && roomIdSet.has(d.roomId) ? floorId : null),
-    pos: d.pos ?? DEFAULT_POS,
-    sensors: sensorsByKey.get(d.deviceKey) || [],
-    roomName: d.roomId ? roomNameById.get(d.roomId) || null : null,
-  }));
+    const pick = (keys) => {
+      for (const k of keys) {
+        const hit = sensors.find(s => {
+          const ek = norm(s.entityKey);
+          const hid = norm(s.haEntityId);
+          return ek.includes(k) || hid.includes(k);
+        });
+        if (hit && hit.value !== undefined && hit.value !== null) return hit.value;
+      }
+      return undefined;
+    };
+
+    if (domain === 'climate') {
+      const v = pick(['hvac_mode', 'system_mode', 'state', 'running_state', 'mode']);
+      const s = norm(v);
+
+      if (['off', 'idle', 'stop'].includes(s)) return false;
+      if (['heat', 'cool', 'auto', 'fan_only', 'dry', 'comfort'].includes(s)) return true;
+
+      return !!fallback;
+    }
+
+    const v = pick(['state', 'power', 'switch']);
+    const s = norm(v);
+    if (['on', 'true', '1', 'open'].includes(s)) return true;
+    if (['off', 'false', '0', 'closed'].includes(s)) return false;
+
+    return !!fallback;
+  }
+
+    // 4) Floor + pos + sensors + roomName
+
+  const devices = rawDevices.map((d) => {
+      const sensors = sensorsByKey.get(d.deviceKey) || [];
+
+      return {
+        ...d,
+        floorId:
+          d.floorId ?? (d.roomId && roomIdSet.has(d.roomId) ? floorId : null),
+        pos: d.pos ?? DEFAULT_POS,
+        sensors,
+        // ✅ Device.isOn биш, sensors-оос бодож өгнө
+        isOn: computeIsOn(d.domain, sensors, d.isOn),
+        roomName: d.roomId ? roomNameById.get(d.roomId) || null : null,
+      };
+    });
+
 
   res.json({ ok: true, devices });
 });
 
+/* -------------------------------- Helpers -------------------------------- */
 
+// deviceId -> хамгийн тохирох haEntityId сонгох
+async function resolveBestHaEntityIdByDeviceId(prisma, deviceId, preferDomain) {
+  const ents = await prisma.deviceEntity.findMany({
+    where: { deviceId },
+    select: { haEntityId: true, entityKey: true },
+    orderBy: { id: 'desc' },
+  });
+
+  const list = (ents || [])
+    .map(e => String(e.haEntityId || e.entityKey || ''))
+    .filter(Boolean);
+
+  if (!list.length) return null;
+
+  if (preferDomain) {
+    const hit = list.find(x => x.startsWith(preferDomain + '.'));
+    if (hit) return hit;
+  }
+
+  return list[0];
+}
+
+// action normalize (edge executeCommand дээр climate.set_setpoint -> set_temperature болгож ойлгоход тусална)
+function normalizeAction(domain, action) {
+  if (!action) return action;
+  if (domain === 'climate' && action === 'set_setpoint') return 'set_temperature';
+  return action;
+}
 
 /* Edge рүү push хийх best-effort туслах */
 async function pushToEdgeIfPossible(prisma, edge, edgeCmd, sendCommand) {
@@ -234,21 +304,21 @@ async function pushToEdgeIfPossible(prisma, edge, edgeCmd, sendCommand) {
     const result = await sendCommand(edge, edgeCmd); // танай services/edgeClient.js
     await prisma.edgeCommand.update({
       where: { id: edgeCmd.id },
-      data: { status: 'sent', sentAt: new Date() },
+      data: { status: 'sent', sentAt: new Date(), error: null },
     });
     return { pushed: true, result };
   } catch (e) {
-    // push бүтэлгүйтвэл queued хэвээр үлдээнэ
     await prisma.edgeCommand.update({
       where: { id: edgeCmd.id },
-      data: { status: 'queued', error: String(e) },
+      data: { status: 'queued', error: String(e?.message || e) },
     });
-    return { pushed: false, error: String(e) };
+    return { pushed: false, error: String(e?.message || e) };
   }
 }
 
+/* ----------------------------- Route ------------------------------------ */
 /* POST /api/devices/:id/command
-   body: { action: 'on'|'off'|'toggle'|'set_brightness'|..., value?: any }
+   body: { action, value?, entityKey?, haEntityId?, data? }
 */
 r.post('/devices/:id/command', auth, async (req, res) => {
   const prisma = req.app.locals.prisma;
@@ -257,14 +327,27 @@ r.post('/devices/:id/command', auth, async (req, res) => {
 
   if (!id || !action) return res.status(400).json({ error: 'bad_request' });
 
+  // ✅ helper
+  const toNum = (x) => {
+    if (x === undefined || x === null) return null;
+    const n = typeof x === 'number' ? x : Number(x);
+    return Number.isFinite(n) ? n : null;
+  };
+  const round05 = (n) => Math.round(n * 2) / 2;
+
   try {
     // Төхөөрөмж + харгалзах site/household
     const device = await prisma.device.findUnique({
       where: { id },
       select: {
-        id: true, name: true, deviceKey: true, domain: true, type: true,
-        siteId: true, householdId: true,
-        site: { select: { id: true, edge: true } }, // EdgeNode-г авах
+        id: true,
+        name: true,
+        deviceKey: true,
+        domain: true,
+        type: true,
+        siteId: true,
+        householdId: true,
+        site: { select: { id: true, edge: true } },
       },
     });
     if (!device) return res.status(404).json({ error: 'device_not_found' });
@@ -276,7 +359,12 @@ r.post('/devices/:id/command', auth, async (req, res) => {
     });
     if (!member) return res.status(403).json({ error: 'forbidden' });
 
-    // Хэрэглэгчийн үйлдлийн лог
+    // ✅ Edge олдохгүй бол буцаана
+    if (!device.site?.edge) {
+      return res.status(404).json({ error: 'edge_not_found' });
+    }
+
+    // Хэрэглэгчийн үйлдлийн лог (энэ хэвээр)
     const ctrl = await prisma.deviceControl.create({
       data: {
         deviceId: device.id,
@@ -287,42 +375,133 @@ r.post('/devices/:id/command', auth, async (req, res) => {
       },
     });
 
+    // ✅ haEntityId resolve (request дээр ирээгүй бол DB-ээс)
+    let finalHaEntityId = haEntityId ?? null;
+    if (!finalHaEntityId) {
+      finalHaEntityId = await resolveBestHaEntityIdByDeviceId(prisma, device.id, device.domain);
+    }
+
+    // ✅ op заавал өгнө
+    const opFinal = 'call_service';
+
+    // ✅ action normalize (алдаа гарвал шууд 400)
+    let actionFinal;
+    try {
+      actionFinal = normalizeAction(device.domain, action);
+    } catch (e) {
+      return res.status(400).json({ error: 'invalid_action', detail: String(e?.message || e) });
+    }
+
+
+    // ✅ data бэлтгэх (clone)
+    const incomingData =
+      (req.body && req.body.data && typeof req.body.data === 'object') ? req.body.data : {};
+    const dataFinal = { ...incomingData };
+
+    // ✅ entity_id-г баталгаажуул
+    if (finalHaEntityId && !dataFinal.entity_id) {
+      dataFinal.entity_id = finalHaEntityId;
+    }
+
+    /* ===================== ✅ ONLY FIX (climate on/off) ===================== */
+    // climate дээр turn_on/turn_off ажиллахгүй → set_hvac_mode болгож хөрвүүлнэ
+    if (device.domain === 'climate') {
+      const a = String(actionFinal || '').toLowerCase();
+
+      // ON
+      if (a === 'turn_on' || a === 'on') {
+        actionFinal = 'set_hvac_mode';
+        if (!dataFinal.hvac_mode) dataFinal.hvac_mode = 'heat'; // эсвэл 'auto'
+      }
+
+      // OFF
+      if (a === 'turn_off' || a === 'off') {
+        actionFinal = 'set_hvac_mode';
+        if (!dataFinal.hvac_mode) dataFinal.hvac_mode = 'off';
+      }
+    }
+    /* ===================== ✅ ONLY FIX END ===================== */
+
+    // ✅ climate.set_temperature үед temperature-г value-с авна + round 0.5
+    if (device.domain === 'climate' && actionFinal === 'set_temperature') {
+      if (dataFinal.temperature === undefined || dataFinal.temperature === null) {
+        const t = toNum(value);
+        if (t !== null) dataFinal.temperature = t;
+      }
+
+      const t2 = toNum(dataFinal.temperature);
+      if (t2 !== null) dataFinal.temperature = round05(t2);
+    }
+
+    // ✅ ЭНД Л хамгийн чухал баталгаажуулалт:
+    // Edge executeCommand дээр "data.entity_id/device_id/area_id байх ёстой" гэж шалгадаг.
+    // Олдохгүй бол queue хийхгүй, шууд 400 буцаана (ингэснээр "failed" бүртгэл үүсэхгүй).
+    const hasTarget = !!(dataFinal.entity_id || dataFinal.device_id || dataFinal.area_id);
+    if (!hasTarget) {
+      return res.status(400).json({
+        error: 'missing_target',
+        message: 'data.entity_id (or device_id/area_id) is required',
+        detail: { deviceId: device.id, deviceKey: device.deviceKey, domain: device.domain, action: actionFinal },
+      });
+    }
+
     // Queue-д payload бэлтгэх
     const payload = {
       id: crypto.randomUUID(),
       type: 'device.command',
+      op: opFinal,
       ts: new Date().toISOString(),
       event: 'user.command',
+
       householdId: device.householdId,
       siteId: device.siteId,
+
+      deviceId: device.id,
+      deviceKey: device.deviceKey,
+
+      domain: device.domain,
+      devType: device.type,
+
+      action: actionFinal,
+      value: value ?? null,
+
+      userId: req.user.sub,
+
+      entityKey: entityKey ?? null,
+      haEntityId: finalHaEntityId,
+      data: dataFinal,
+    };
+
+    console.log('[devices.command] queued', {
       deviceId: device.id,
       deviceKey: device.deviceKey,
       domain: device.domain,
-      devType: device.type,
-      action,
-      value: value ?? null,
-      userId: req.user.sub,
-      entityKey: entityKey ?? null,   // жишээ: 'Heat_Temperature', 'state'
-      haEntityId: haEntityId ?? null, // жишээ: 'climate.xxx', 'switch.xxx'
-    };
+      action: actionFinal,
+      op: opFinal,
+      haEntityId: finalHaEntityId,
+      data: dataFinal,
+    });
 
-    // Queue-рүү бичих
-    if (!device.site?.edge) {
-      // Edge байхгүй бол зөвхөн queue үлдээх боломжгүй тул 404 эргүүлнэ
-      return res.status(404).json({ error: 'edge_not_found' });
+    // ✅ edgeId-г аль талбар байгаагаас нь хамаарч fallback
+    const edgeRef = device.site.edge;
+    const edgeIdForCmd = edgeRef?.id || edgeRef?.edgeId; // (schema-аас хамаарна)
+
+    if (!edgeIdForCmd) {
+      return res.status(500).json({ error: 'edge_id_missing_on_site_edge' });
     }
 
     const edgeCmd = await prisma.edgeCommand.create({
       data: {
-        edgeId: device.site.edge.id,
+        edgeId: edgeIdForCmd,
         payload,
         status: 'queued',
       },
+      select: { id: true },
     });
 
-    // Шууд push хийж чадвал 'sent' болгоно (best-effort)
+    // Шууд push (best-effort)
     const { pushed, result, error } =
-      await pushToEdgeIfPossible(prisma, device.site.edge, edgeCmd, req.app.locals.sendCommand /* services/edgeClient.js-р дамжуул */);
+      await pushToEdgeIfPossible(prisma, device.site.edge, edgeCmd, req.app.locals.sendCommand);
 
     return res.json({
       ok: true,
@@ -332,13 +511,19 @@ r.post('/devices/:id/command', auth, async (req, res) => {
       pushed,
       result: result ?? null,
       error: error ?? null,
+      haEntityId: finalHaEntityId,
+      payloadPreview: {
+        domain: payload.domain,
+        action: payload.action,
+        op: payload.op,
+        data: payload.data,
+      },
     });
   } catch (e) {
     console.error('[devices.command] error', e);
-    return res.status(500).json({ error: 'server_error', detail: String(e) });
+    return res.status(500).json({ error: 'server_error', detail: String(e?.message || e) });
   }
 });
-
 // POST /api/sites/:siteId/devices/:deviceKey/command
 r.post('/sites/:siteId/devices/:deviceKey/command', auth, async (req, res) => {
   const prisma = req.app.locals.prisma;
@@ -523,5 +708,131 @@ r.get('/sites/:siteId/floors/:floorId/devices/card', async (req, res) => {
     res.status(500).json({ ok: false, error: 'internal_error' });
   }
 });
+
+
+async function resolveEdgeId(prisma, deviceKey) {
+  // 1) deviceKey -> Device (householdId)
+  const dev = await prisma.device.findFirst({
+    where: { deviceKey },
+    select: { householdId: true },
+  });
+
+  if (!dev?.householdId) {
+    throw new Error(`device_not_found_or_no_household: ${deviceKey}`);
+  }
+
+  // 2) householdId -> EdgeNode (edgeId)
+  //    (EdgeNode дээр isActive / status гэх мэт талбар байвал энд нэмээрэй)
+  const edge = await prisma.edgeNode.findFirst({
+    where: { householdId: dev.householdId },
+    select: { edgeId: true },
+    orderBy: { updatedAt: 'desc' }, // олон edge байвал хамгийн сүүлийнх
+  });
+
+  if (!edge?.edgeId) {
+    throw new Error(`edge_not_found_for_household: ${dev.householdId}`);
+  }
+
+  return edge.edgeId;
+}
+
+/**
+ * Flutter → Main
+ * POST /api/edge/devices/:deviceKey/command
+ * Body: { op, service, target, data }
+ *
+ * → EdgeCommand(status='queued') үүсгэнэ
+ */
+
+// deviceKey -> хамгийн тохирох haEntityId сонгох
+async function resolveBestHaEntityId(prisma, deviceKey, preferDomain) {
+  const dev = await prisma.device.findFirst({
+    where: { deviceKey },
+    select: { id: true },
+  });
+  if (!dev || !dev.id) return null;
+
+  const ents = await prisma.deviceEntity.findMany({
+    where: { deviceId: dev.id },
+    select: { haEntityId: true, entityKey: true },
+    orderBy: { id: 'desc' },
+  });
+
+  const list = (ents || [])
+    .map((e) => String(e.haEntityId || e.entityKey || ''))
+    .filter(Boolean);
+
+  if (!list.length) return null;
+
+  if (preferDomain) {
+    const hit = list.find((x) => x.startsWith(preferDomain + '.'));
+    if (hit) return hit;
+  }
+
+  return list[0];
+}
+
+r.post('/edge/devices/:deviceKey/command', async (req, res) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const { deviceKey } = req.params;
+    const { op, service, target, data } = req.body || {};
+
+    // ✅ edgeId-г DB-ээс resolve (танай байгаа функц)
+    const edgeId = await resolveEdgeId(prisma, deviceKey);
+    console.log('Resolved edgeId:', edgeId);
+
+    // ✅ deviceKey -> haEntityId
+    const haEntityId = await resolveBestHaEntityId(prisma, deviceKey, service);
+    console.log('Resolved haEntityId:', haEntityId);
+    // ✅ payload: edge executeCommand дээр танигдах "device.command" бүтэц
+    const payload = {
+      type: 'device.command',
+
+      // flutter-аас ирсэн талбарууд
+      op,
+      deviceKey,
+
+      // edge талын handler: domain/action гэж уншина (service/target-оос хөрвүүлэв)
+      domain: service,
+      action: target,
+
+      // entity_id-г edge талд заавал өгөх (байвал)
+      haEntityId,
+
+      // data дотор entity_id нэмнэ (байвал)
+      data: Object.assign({}, data || {}, haEntityId ? { entity_id: haEntityId } : {}),
+    };
+
+    const cmd = await prisma.edgeCommand.create({
+      data: {
+        edgeId,
+        status: 'queued',
+
+        // эднийг хадгалбал query хийхэд амар
+        deviceKey,
+        type: 'device.command',
+        payload,
+      },
+      select: { id: true, edgeId: true, status: true },
+    });
+
+    if (!haEntityId) {
+      console.warn('[CMD create] haEntityId NOT found (DeviceEntity mapping missing?)', { deviceKey, service, target });
+    }
+
+    return res.json({
+      ok: true,
+      id: cmd.id,
+      edgeId: cmd.edgeId,
+      status: cmd.status,
+      haEntityId,
+    });
+  } catch (e) {
+    console.error('[CMD create] error', e);
+    return res.status(500).json({ ok: false, error: String((e && e.message) || e) });
+  }
+});
+
 
 export default r;

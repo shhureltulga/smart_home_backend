@@ -7,7 +7,6 @@ import { PrismaClient } from '@prisma/client';
 
 import complexes from './routes/complexes.js';
 import unitRoutes from './routes/units.js';
-
 // Routes
 import deviceRoutes from './routes/devices.js';
 import edgeRoutes from '../src/routes/edge.routes.js';
