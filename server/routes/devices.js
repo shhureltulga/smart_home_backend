@@ -22,6 +22,76 @@ async function resolveRoomId({ householdId, roomId, roomName }) {
   return found?.id;
 }
 
+// =======================
+// Camera: entityId -> public playUrl + snapshotUrl
+// GET /api/camera/:entityId/live
+// =======================
+r.get('/camera/:entityId/live', async (req, res) => {
+  try {
+    const prisma = req.app.locals.prisma;
+    const entityIdRaw = String(req.params.entityId || '').trim(); // ex: camera.192_168_1_173
+
+    if (!entityIdRaw) return res.status(400).json({ ok: false, error: 'missing_entityId' });
+
+    // entityId -> go2rtc src (camera.192_... => camera_192_...)
+    const src = entityIdRaw.replace(/\./g, '_'); // camera_192_168_1_173
+
+    // 1) DeviceEntity-аас deviceId олно (camera domain)
+    const ent = await prisma.deviceEntity.findFirst({
+      where: { haEntityId: entityIdRaw, domain: 'camera' },
+      select: { deviceId: true },
+    });
+
+    if (!ent?.deviceId) {
+      return res.status(404).json({ ok: false, error: 'camera_entity_not_found' });
+    }
+
+    // 2) Device -> householdId (эсвэл siteId) аваад edgeKey resolve
+    const dev = await prisma.device.findUnique({
+      where: { id: ent.deviceId },
+      select: { id: true, householdId: true, siteId: true },
+    });
+
+    if (!dev?.householdId) {
+      return res.status(404).json({ ok: false, error: 'device_not_found' });
+    }
+
+    // 3) householdId -> EdgeNode.edgeId (чи өмнө нь resolveEdgeId дээр ашиглаж байсан логик)
+    const edge = await prisma.edgeNode.findFirst({
+      where: { householdId: dev.householdId },
+      select: { edgeId: true },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    const edgeKey = edge?.edgeId; // энэ нь camProxy дээрх key байх ёстой (edge1 гэх мэт)
+    if (!edgeKey) {
+      return res.status(404).json({ ok: false, error: 'edge_not_found_for_household' });
+    }
+
+    // 4) Public base (Cloudflare дээр https байх ёстой)
+    const publicBase = `${req.protocol}://${req.get('host')}`;
+
+    const playUrl =
+      `${publicBase}/api/cam/${encodeURIComponent(edgeKey)}/api/stream.m3u8?src=${encodeURIComponent(src)}`;
+
+    const snapshotUrl =
+      `${publicBase}/api/cam/${encodeURIComponent(edgeKey)}/api/frame.jpeg?src=${encodeURIComponent(src)}`;
+
+    return res.json({
+      ok: true,
+      type: 'hls',
+      entityId: entityIdRaw,
+      src,
+      edgeKey,
+      playUrl,
+      snapshotUrl,
+    });
+  } catch (e) {
+    console.error('[camera.live] error', e);
+    return res.status(500).json({ ok: false, error: 'server_error', detail: String(e?.message || e) });
+  }
+});
+
 
 /* ----------------------- Household overview ----------------------- */
 
@@ -134,15 +204,156 @@ r.patch('/devices/:id/position', async (req, res) => {
 /* GET /api/sites/:siteId/floors/:floorId/devices
    → [{ id, name, domain, type, roomId, pos, isOn, deviceKey, label, sensors: [...] }] */
 
+// r.get('/sites/:siteId/floors/:floorId/devices', async (req, res) => {
+//   const prisma = req.app.locals.prisma;
+//   const { siteId, floorId } = req.params;
+
+//   // 1) Энэ давхрын өрөөнүүд – name-ийг нь бас авна
+//   const rooms = await prisma.room.findMany({
+//     where: { siteId, floorId },
+//     select: { id: true, name: true, floorId: true },
+//   });
+//   const roomIds = rooms.map((r) => r.id);
+//   const roomIdSet = new Set(roomIds);
+//   const roomNameById = new Map(
+//     rooms.map((r) => [r.id, (r.name || 'Room').trim()])
+//   );
+
+//   // 2) Төхөөрөмжүүд
+//   const rawDevices = await prisma.device.findMany({
+//     where: {
+//       siteId,
+//       OR: [
+//         { floorId }, // өөр дээрээ энэ давхарт байгаа
+//         roomIds.length
+//           ? { roomId: { in: roomIds } } // энэ давхрын өрөөнүүдэд байгаа
+//           : { id: { in: [] } },
+//       ],
+//     },
+//     orderBy: [{ roomId: 'asc' }, { name: 'asc' }],
+//     select: {
+//       id: true,
+//       name: true,
+//       domain: true,
+//       type: true,
+//       deviceClass: true,
+//       roomId: true,
+//       floorId: true,
+//       pos: true,
+//       isOn: true,
+//       deviceKey: true,
+//       label: true,
+//     },
+//   });
+
+//   const DEFAULT_POS = { x: 0, y: 0.9, z: 0 };
+
+//   // 3) Эдгээр deviceKey-үүдийн latestSensor-уудыг татна
+//   const deviceKeys = rawDevices.map((d) => d.deviceKey);
+//   const latestRows = deviceKeys.length
+//     ? await prisma.latestSensor.findMany({
+//         where: {
+//           siteId,
+//           deviceKey: { in: deviceKeys },
+//         },
+//         select: {
+//           deviceKey: true,
+//           entityKey: true,
+//           value: true,
+//           unit: true,
+//           stateClass: true,
+//           domain: true,
+//           haEntityId: true,
+//         },
+//       })
+//     : [];
+
+//   const sensorsByKey = new Map();
+//   for (const s of latestRows) {
+//     const arr = sensorsByKey.get(s.deviceKey) || [];
+//     arr.push({
+//       entityKey: s.entityKey,
+//       value: s.value,
+//       unit: s.unit,
+//       stateClass: s.stateClass,
+//       domain: s.domain,
+//       haEntityId: s.haEntityId,
+//     });
+//     sensorsByKey.set(s.deviceKey, arr);
+//   }
+//   // 3) sensorsByKey гээд бэлдсэний дараа, devices map хийхийн өмнө:
+//   function computeIsOn(domain, sensors, fallback) {
+//     const norm = (v) => (v === null || v === undefined) ? '' : String(v).toLowerCase().trim();
+
+//     const pick = (keys) => {
+//       for (const k of keys) {
+//         const hit = sensors.find(s => {
+//           const ek = norm(s.entityKey);
+//           const hid = norm(s.haEntityId);
+//           return ek.includes(k) || hid.includes(k);
+//         });
+//         if (hit && hit.value !== undefined && hit.value !== null) return hit.value;
+//       }
+//       return undefined;
+//     };
+
+//     if (domain === 'climate') {
+//       const v = pick(['hvac_mode', 'system_mode', 'state', 'running_state', 'mode']);
+//       const s = norm(v);
+
+//       if (['off', 'idle', 'stop'].includes(s)) return false;
+//       if (['heat', 'cool', 'auto', 'fan_only', 'dry', 'comfort'].includes(s)) return true;
+
+//       return !!fallback;
+//     }
+
+//     const v = pick(['state', 'power', 'switch']);
+//     const s = norm(v);
+//     if (['on', 'true', '1', 'open'].includes(s)) return true;
+//     if (['off', 'false', '0', 'closed'].includes(s)) return false;
+
+//     return !!fallback;
+//   }
+
+//     // 4) Floor + pos + sensors + roomName
+
+//   const devices = rawDevices.map((d) => {
+//       const sensors = sensorsByKey.get(d.deviceKey) || [];
+
+//       return {
+//         ...d,
+//         floorId:
+//           d.floorId ?? (d.roomId && roomIdSet.has(d.roomId) ? floorId : null),
+//         pos: d.pos ?? DEFAULT_POS,
+//         sensors,
+//         // ✅ Device.isOn биш, sensors-оос бодож өгнө
+//         isOn: computeIsOn(d.domain, sensors, d.isOn),
+//         roomName: d.roomId ? roomNameById.get(d.roomId) || null : null,
+//       };
+//     });
+
+
+//   res.json({ ok: true, devices });
+// });
+
 r.get('/sites/:siteId/floors/:floorId/devices', async (req, res) => {
   const prisma = req.app.locals.prisma;
   const { siteId, floorId } = req.params;
+
+  // ✅ 0) Энэ site-ийн EdgeNode-оос edgeId-г олно (edge_nas_01 гэх мэт)
+  const edge = await prisma.edgeNode.findFirst({
+    where: { siteId },
+    select: { edgeId: true },
+    orderBy: { createdAt: 'desc' }, // хүсвэл
+  });
+  const siteEdgeId = edge?.edgeId || null;
 
   // 1) Энэ давхрын өрөөнүүд – name-ийг нь бас авна
   const rooms = await prisma.room.findMany({
     where: { siteId, floorId },
     select: { id: true, name: true, floorId: true },
   });
+
   const roomIds = rooms.map((r) => r.id);
   const roomIdSet = new Set(roomIds);
   const roomNameById = new Map(
@@ -154,10 +365,8 @@ r.get('/sites/:siteId/floors/:floorId/devices', async (req, res) => {
     where: {
       siteId,
       OR: [
-        { floorId }, // өөр дээрээ энэ давхарт байгаа
-        roomIds.length
-          ? { roomId: { in: roomIds } } // энэ давхрын өрөөнүүдэд байгаа
-          : { id: { in: [] } },
+        { floorId },
+        roomIds.length ? { roomId: { in: roomIds } } : { id: { in: [] } },
       ],
     },
     orderBy: [{ roomId: 'asc' }, { name: 'asc' }],
@@ -178,14 +387,11 @@ r.get('/sites/:siteId/floors/:floorId/devices', async (req, res) => {
 
   const DEFAULT_POS = { x: 0, y: 0.9, z: 0 };
 
-  // 3) Эдгээр deviceKey-үүдийн latestSensor-уудыг татна
-  const deviceKeys = rawDevices.map((d) => d.deviceKey);
+  // 3) latestSensor-ууд (deviceKey-ээр)
+  const deviceKeys = rawDevices.map((d) => d.deviceKey).filter(Boolean);
   const latestRows = deviceKeys.length
     ? await prisma.latestSensor.findMany({
-        where: {
-          siteId,
-          deviceKey: { in: deviceKeys },
-        },
+        where: { siteId, deviceKey: { in: deviceKeys } },
         select: {
           deviceKey: true,
           entityKey: true,
@@ -211,13 +417,14 @@ r.get('/sites/:siteId/floors/:floorId/devices', async (req, res) => {
     });
     sensorsByKey.set(s.deviceKey, arr);
   }
-  // 3) sensorsByKey гээд бэлдсэний дараа, devices map хийхийн өмнө:
+
   function computeIsOn(domain, sensors, fallback) {
-    const norm = (v) => (v === null || v === undefined) ? '' : String(v).toLowerCase().trim();
+    const norm = (v) =>
+      v === null || v === undefined ? '' : String(v).toLowerCase().trim();
 
     const pick = (keys) => {
       for (const k of keys) {
-        const hit = sensors.find(s => {
+        const hit = sensors.find((s) => {
           const ek = norm(s.entityKey);
           const hid = norm(s.haEntityId);
           return ek.includes(k) || hid.includes(k);
@@ -230,10 +437,9 @@ r.get('/sites/:siteId/floors/:floorId/devices', async (req, res) => {
     if (domain === 'climate') {
       const v = pick(['hvac_mode', 'system_mode', 'state', 'running_state', 'mode']);
       const s = norm(v);
-
       if (['off', 'idle', 'stop'].includes(s)) return false;
-      if (['heat', 'cool', 'auto', 'fan_only', 'dry', 'comfort'].includes(s)) return true;
-
+      if (['heat', 'cool', 'auto', 'fan_only', 'dry', 'comfort'].includes(s))
+        return true;
       return !!fallback;
     }
 
@@ -241,27 +447,44 @@ r.get('/sites/:siteId/floors/:floorId/devices', async (req, res) => {
     const s = norm(v);
     if (['on', 'true', '1', 'open'].includes(s)) return true;
     if (['off', 'false', '0', 'closed'].includes(s)) return false;
-
     return !!fallback;
   }
 
-    // 4) Floor + pos + sensors + roomName
+  // ✅ 4) Camera entityId-г DeviceEntity хүснэгтээс deviceId-ээр нь олж map болгоно
+  const deviceIds = rawDevices.map((d) => d.id);
 
+  const cameraEntities = deviceIds.length
+    ? await prisma.deviceEntity.findMany({
+        where: { deviceId: { in: deviceIds }, domain: 'camera' },
+        select: { deviceId: true, haEntityId: true },
+      })
+    : [];
+
+  const cameraByDeviceId = new Map(
+    cameraEntities
+      .filter((x) => x.haEntityId)
+      .map((x) => [x.deviceId, x.haEntityId])
+  );
+
+  // 5) Final devices
   const devices = rawDevices.map((d) => {
-      const sensors = sensorsByKey.get(d.deviceKey) || [];
+    const sensors = sensorsByKey.get(d.deviceKey) || [];
 
-      return {
-        ...d,
-        floorId:
-          d.floorId ?? (d.roomId && roomIdSet.has(d.roomId) ? floorId : null),
-        pos: d.pos ?? DEFAULT_POS,
-        sensors,
-        // ✅ Device.isOn биш, sensors-оос бодож өгнө
-        isOn: computeIsOn(d.domain, sensors, d.isOn),
-        roomName: d.roomId ? roomNameById.get(d.roomId) || null : null,
-      };
-    });
+    return {
+      ...d,
+      floorId: d.floorId ?? (d.roomId && roomIdSet.has(d.roomId) ? floorId : null),
+      pos: d.pos ?? DEFAULT_POS,
+      sensors,
+      isOn: computeIsOn(d.domain, sensors, d.isOn),
+      roomName: d.roomId ? roomNameById.get(d.roomId) || null : null,
 
+      // ✅ camera src
+      cameraEntityId: cameraByDeviceId.get(d.id) || null,
+
+      // ✅ EDGE ID-г EdgeNode-оос
+      edgeId: siteEdgeId,
+    };
+  });
 
   res.json({ ok: true, devices });
 });
